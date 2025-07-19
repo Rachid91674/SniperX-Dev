@@ -784,49 +784,7 @@ def initialize_all_files_once(script_dir_path):
     # --- END: Comprehensive File Initialization ---
     logging.info("File initialisation and template check complete.")
 
-def start_slave_watchdog(script_dir_path):
-    slave_script_path = os.path.join(script_dir_path, 'run_testchrone_on_csv_change.py')
-    pid_file = os.path.join(script_dir_path, 'testchrone_watchdog.pid')
-    if not os.path.exists(slave_script_path):
-        logging.error(f"Watchdog script '{slave_script_path}' not found.")
-        return None
 
-    # Terminate previous watchdog process if PID file exists
-    if os.path.exists(pid_file):
-        try:
-            with open(pid_file, 'r') as pf:
-                old_pid = int(pf.read().strip())
-            logging.info(f"Found previous watchdog PID {old_pid}. Attempting termination...")
-            os.kill(old_pid, signal.SIGTERM)
-            start_time = time.time()
-            while time.time() - start_time < 5:
-                try:
-                    os.kill(old_pid, 0)
-                    time.sleep(0.5)
-                except OSError:
-                    break
-            else:
-                os.kill(old_pid, signal.SIGKILL)
-                logging.info(f"Force killed watchdog PID {old_pid} after timeout.")
-        except Exception as e:
-            logging.info(f"Unable to terminate previous watchdog PID from file: {e}")
-        finally:
-            try:
-                os.remove(pid_file)
-            except FileNotFoundError:
-                pass
-
-    try:
-        process = subprocess.Popen([sys.executable, slave_script_path], cwd=script_dir_path)
-        with open(pid_file, 'w') as pf:
-            pf.write(str(process.pid))
-        logging.info(f"Watchdog script '{slave_script_path}' started with PID {process.pid}.")
-        return process
-    except Exception as e:
-        logging.error(f"Failed to start watchdog: {e}")
-        return None
-
-def main_token_processing_loop(script_dir_path):
     tokens = get_trending_tokens()
     prelim_filtered_tokens = filter_preliminary(tokens)
     window_results_aggregator = {}
@@ -843,95 +801,40 @@ def main_token_processing_loop(script_dir_path):
 if __name__ == "__main__":
     print("--- SniperX V2 Starting ---")
     SCRIPT_DIRECTORY = os.path.dirname(os.path.abspath(__file__))
-    monitoring_process = None
-    watchdog_process = None
-    
-    initialize_all_files_once(SCRIPT_DIRECTORY) 
 
-    monitoring_script_path = os.path.join(SCRIPT_DIRECTORY, "Monitoring.py")
-    if os.path.exists(monitoring_script_path):
-        try:
-            monitoring_process = subprocess.Popen([sys.executable, monitoring_script_path], cwd=SCRIPT_DIRECTORY)
-            logging.info(f"Successfully started Monitoring.py (PID: {monitoring_process.pid}).")
-        except Exception as e:
-            logging.error(f"Failed to start Monitoring.py: {e}")
-    else:
-        logging.warning(f"Monitoring.py not found at {monitoring_script_path}. It will not be started.")
-    
-    watchdog_process = start_slave_watchdog(SCRIPT_DIRECTORY)
-    if not WINDOW_MINS: 
+    initialize_all_files_once(SCRIPT_DIRECTORY)
+
+    if not WINDOW_MINS:
         logging.error("No WHALE_TRAP_WINDOW_MINUTES defined. Exiting.")
-        if watchdog_process: watchdog_process.terminate()
-        if monitoring_process: monitoring_process.terminate()
         sys.exit(1)
-        
-    monitoring_lock_file_path = os.path.join(SCRIPT_DIRECTORY, "monitoring_active.lock")
-    check_interval_seconds = 3  # Short pause between lock checks
+
+    results_csv_path = os.path.join(SCRIPT_DIRECTORY, "sniperx_results_1m.csv")
+
+    def csv_has_data(path):
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                return any(True for _ in reader)
+        except Exception:
+            return False
+
+    check_interval_seconds = 3
     try:
         while True:
-            if os.path.exists(monitoring_lock_file_path):
-                logging.info(
-                    f"Monitoring.py is active (lock file found: {monitoring_lock_file_path}). SniperX V2 pausing for {check_interval_seconds} seconds..."
-                )
-                time.sleep(check_interval_seconds)
-                continue
-
             logging.info(f"\n--- Starting new SniperX processing cycle at {datetime.datetime.now()} ---")
-            
-            aggregated_results = {}
             try:
-                aggregated_results = main_token_processing_loop(SCRIPT_DIRECTORY)
-                if aggregated_results: logging.info(f"Cycle complete. Results for windows: {list(aggregated_results.keys())}")
-                else: logging.info("Cycle complete. No results from window processing.")
+                main_token_processing_loop(SCRIPT_DIRECTORY)
             except Exception as e_main_loop:
                 logging.error(f"Unhandled exception in main processing loop: {e_main_loop}", exc_info=True)
-            
-            current_time_utc = datetime.datetime.now(datetime.timezone.utc)
-            if current_time_utc.minute == 0 and aggregated_results: 
-                hr_ts = current_time_utc.strftime('%Y%m%d_%H00')
-                hr_fn = os.path.join(SCRIPT_DIRECTORY, f"sniperx_hourly_report_{hr_ts}.csv") 
-                logging.info(f"Writing hourly report to {hr_fn}")
-                try:
-                    with open(hr_fn, 'w', newline='', encoding='utf-8') as hr_f: 
-                        w = csv.writer(hr_f)
-                        w.writerow(['Window_Minutes','Category','Token_Address','Token_Name','DexScreener_URL'])
-                        for wm, cats_data in aggregated_results.items():
-                            for cat_name, tk_list in cats_data.items():
-                                for tk_item in tk_list:
-                                    addr = tk_item.get('tokenAddress','N/A')
-                                    name = sanitize_name(tk_item.get('name'),tk_item.get('symbol'))
-                                    url = f"https://dexscreener.com/{DEXSCREENER_CHAIN_ID}/{addr}"
-                                    w.writerow([wm,cat_name,addr,name,url])
-                except Exception as e_rep: logging.error(f"Hourly report error: {e_rep}")
-            
-            logging.info(f"Rechecking monitoring lock in {check_interval_seconds}s...")
+
+            if csv_has_data(results_csv_path):
+                subprocess.run([sys.executable, os.path.join(SCRIPT_DIRECTORY, 'risk_detector.py')])
+                subprocess.run([sys.executable, os.path.join(SCRIPT_DIRECTORY, 'Monitoring.py')])
+
             time.sleep(check_interval_seconds)
-            
-    except KeyboardInterrupt: 
+    except KeyboardInterrupt:
         logging.info("\nKeyboardInterrupt. Shutting down SniperX V2...")
     finally:
-        if monitoring_process and monitoring_process.poll() is None:
-            logging.info("Terminating Monitoring.py process...")
-            monitoring_process.terminate()
-            try:
-                monitoring_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                monitoring_process.kill()
-                logging.info("Monitoring.py process killed after timeout due to no response.")
-            except Exception as e_mon_term:
-                logging.error(f"Error during Monitoring.py termination: {e_mon_term}")
-
-        if watchdog_process and watchdog_process.poll() is None:
-            logging.info("Terminating watchdog process...")
-            watchdog_process.terminate()
-            pid_file = os.path.join(SCRIPT_DIRECTORY, 'testchrone_watchdog.pid')
-            try:
-                watchdog_process.wait(timeout=5)
-                logging.info(f"Watchdog process PID {watchdog_process.pid} terminated.")
-            except subprocess.TimeoutExpired:
-                watchdog_process.kill()
-                logging.info(f"Watchdog process PID {watchdog_process.pid} killed after timeout.")
-            finally:
-                if os.path.exists(pid_file):
-                    os.remove(pid_file)
         logging.info("--- SniperX V2 Finished ---")
