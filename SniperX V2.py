@@ -841,6 +841,7 @@ if __name__ == "__main__":
                     continue
 
             if csv_has_data(results_csv_path):
+                subprocess.run([sys.executable, os.path.join(SCRIPT_DIRECTORY, 'test_chrome.py')])
                 subprocess.run([sys.executable, os.path.join(SCRIPT_DIRECTORY, 'risk_detector.py')])
                 subprocess.run([sys.executable, os.path.join(SCRIPT_DIRECTORY, 'Monitoring.py')])
 
