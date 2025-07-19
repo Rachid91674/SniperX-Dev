@@ -783,20 +783,24 @@ def initialize_all_files_once(script_dir_path):
                 logging.error(f"Failed to create template file {filename}: {e}")
     # --- END: Comprehensive File Initialization ---
     logging.info("File initialisation and template check complete.")
+    return
 
 
+def main_token_processing_loop(script_dir_path):
+    """Fetch and process one token sequentially."""
     tokens = get_trending_tokens()
     prelim_filtered_tokens = filter_preliminary(tokens)
-    window_results_aggregator = {}
-    if prelim_filtered_tokens:
-        for wd_min in WINDOW_MINS:
-            try:
-                window_results_aggregator[wd_min] = process_window(wd_min, prelim_filtered_tokens, script_dir_path)
-            except Exception as exc:
-                logging.error(f'[ERROR] Window {wd_min}m exc: {exc}')
-    else:
+    if not prelim_filtered_tokens:
         logging.info("[INFO] No tokens passed preliminary filters for this cycle.")
-    return window_results_aggregator
+        return False
+
+    win_min = WINDOW_MINS[0]
+    try:
+        process_window(win_min, prelim_filtered_tokens, script_dir_path)
+        return True
+    except Exception as exc:
+        logging.error(f"[ERROR] Window {win_min}m exc: {exc}")
+        return False
 
 if __name__ == "__main__":
     print("--- SniperX V2 Starting ---")
@@ -824,10 +828,17 @@ if __name__ == "__main__":
     try:
         while True:
             logging.info(f"\n--- Starting new SniperX processing cycle at {datetime.datetime.now()} ---")
-            try:
-                main_token_processing_loop(SCRIPT_DIRECTORY)
-            except Exception as e_main_loop:
-                logging.error(f"Unhandled exception in main processing loop: {e_main_loop}", exc_info=True)
+
+            if not csv_has_data(results_csv_path):
+                try:
+                    wrote = main_token_processing_loop(SCRIPT_DIRECTORY)
+                    if not wrote:
+                        time.sleep(check_interval_seconds)
+                        continue
+                except Exception as e_main_loop:
+                    logging.error(f"Unhandled exception in main processing loop: {e_main_loop}", exc_info=True)
+                    time.sleep(check_interval_seconds)
+                    continue
 
             if csv_has_data(results_csv_path):
                 subprocess.run([sys.executable, os.path.join(SCRIPT_DIRECTORY, 'risk_detector.py')])
