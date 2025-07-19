@@ -1,0 +1,6 @@
+2025-07-20 00:10:15,803 - SniperXMain - INFO - --- SniperX V2 Starting ---
+2025-07-20 00:10:15,806 - SniperXMain - INFO - Fetching trending tokens from Moralis...
+2025-07-20 00:10:15,806 - SniperXMain - ERROR - INFO:SniperXMain:Fetching trending tokens from Moralis...
+2025-07-20 00:10:15,806 - SniperXMain - INFO - Trying Moralis API key 1/5
+2025-07-20 00:10:15,807 - SniperXMain - ERROR - INFO:SniperXMain:Trying Moralis API key 1/5
+2025-07-20 00:10:17,806 - SniperXMain - INFO - [INFO] Retrieved 197 trending tokens.

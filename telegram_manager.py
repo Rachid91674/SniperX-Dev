@@ -9,6 +9,7 @@ import asyncio
 import json
 from decimal import Decimal
 from dotenv import load_dotenv
+import pytz
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext, CallbackQueryHandler
 import time
@@ -482,7 +483,16 @@ def main_telegram_bot() -> None:
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
 
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    # Create application with timezone support
+    application = (
+        Application.builder()
+        .token(TELEGRAM_TOKEN)
+        .build()
+    )
+    
+    # Set the default timezone to UTC if not already set
+    if not hasattr(application, 'tzinfo'):
+        application.tzinfo = pytz.UTC
 
     # Command handlers
     application.add_handler(CommandHandler("start", start_command)) # Start SniperX
