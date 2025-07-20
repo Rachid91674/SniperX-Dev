@@ -479,8 +479,102 @@ def click_clusters_and_extract_supply_data(driver, initial_data_list: list) -> t
     
     return augmented_initial_data, processed_cluster_data
 
+def wait_for_magic_nodes(driver, thread_id_str, timeout=15):
+    """
+    Wait for magic nodes to be fully loaded and visible.
+    Returns True if magic nodes are found and visible, False otherwise.
+    """
+    try:
+        # Define selectors
+        MAGIC_NODE_SELECTOR = "div[class*='MagicNode']"
+        
+        logger.info(f"[{thread_id_str}] Waiting for magic nodes to be visible...")
+        
+        # Wait for magic nodes to be present and visible
+        try:
+            # Wait for at least one magic node to be present in the DOM
+            magic_nodes = WebDriverWait(driver, timeout).until(
+                EC.presence_of_all_elements_located((By.CSS_SELECTOR, MAGIC_NODE_SELECTOR))
+            )
+            
+            if not magic_nodes:
+                logger.warning(f"[{thread_id_str}] No magic nodes found")
+                return False
+                
+            logger.info(f"[{thread_id_str}] Found {len(magic_nodes)} magic nodes")
+            
+            # Additional check to ensure nodes are visible and have rendered
+            visible_nodes = []
+            for node in magic_nodes:
+                try:
+                    if node.is_displayed():
+                        visible_nodes.append(node)
+                except StaleElementReferenceException:
+                    continue
+            
+            if not visible_nodes:
+                logger.warning(f"[{thread_id_str}] No visible magic nodes found")
+                return False
+                
+            logger.info(f"[{thread_id_str}] {len(visible_nodes)} magic nodes are visible")
+            
+            # Small delay to ensure all animations and rendering is complete
+            time.sleep(1.5)
+            return True
+            
+        except TimeoutException:
+            logger.warning(f"[{thread_id_str}] Timeout waiting for magic nodes to load")
+            take_screenshot(driver, "timeout_magic_nodes")
+            return False
+            
+    except Exception as e:
+        logger.error(f"[{thread_id_str}] Error in wait_for_magic_nodes: {str(e)}")
+        take_screenshot(driver, "error_wait_magic_nodes")
+        return False
+
+def wait_for_cluster_details(driver, thread_id_str, rank_str, timeout=15):
+    """
+    Wait for cluster details panel to be visible after clicking a cluster.
+    Returns True if panel is visible, False otherwise.
+    """
+    try:
+        CLUSTER_DETAILS_PANEL = "div[class*='ClusterDetails']"
+        
+        logger.info(f"[{thread_id_str}] Waiting for cluster details panel to be visible for Rank #{rank_str}...")
+        
+        # Wait for cluster details panel to be visible
+        try:
+            WebDriverWait(driver, timeout).until(
+                EC.visibility_of_element_located((By.CSS_SELECTOR, CLUSTER_DETAILS_PANEL))
+            )
+            logger.info(f"[{thread_id_str}] Cluster details panel is now visible for Rank #{rank_str}")
+            time.sleep(1)  # Small delay to ensure panel is fully rendered
+            return True
+            
+        except TimeoutException:
+            logger.warning(f"[{thread_id_str}] Timeout waiting for cluster details panel for Rank #{rank_str}")
+            take_screenshot(driver, f"timeout_cluster_details_{rank_str}")
+            return False
+            
+    except Exception as e:
+        logger.error(f"[{thread_id_str}] Error in wait_for_cluster_details for Rank #{rank_str}: {str(e)}")
+        take_screenshot(driver, f"error_wait_cluster_details_{rank_str}")
+        return False
+
 def click_cluster_item(driver, scroller, rank_to_find_str, address_to_find, thread_id_str, max_scroll_attempts=15):
-    """Helper function to find and click a cluster item in the virtualized list."""
+    """
+    Helper function to find and click a cluster item in the virtualized list.
+    Sequence:
+    1. Wait for magic nodes to be visible
+    2. Find and click the target cluster
+    3. Wait for cluster details panel to appear
+    """
+    # First, ensure magic nodes are loaded and visible
+    if not wait_for_magic_nodes(driver, thread_id_str):
+        logger.error(f"[{thread_id_str}] Failed to load magic nodes before clicking cluster")
+        return False
+        
+    # Scroll to top and wait for list to reset
     driver.execute_script("arguments[0].scrollTop = 0", scroller)
     time.sleep(2)  # Wait for list to reset to the top
 
@@ -506,12 +600,21 @@ def click_cluster_item(driver, scroller, rank_to_find_str, address_to_find, thre
                     
                     if rank_text == rank_to_find_str and addr_text == address_to_find:
                         logger.info(f"[{thread_id_str}] Found target Rank #{rank_to_find_str}. Attempting click.")
+                        
+                        # Click the cluster button
                         if click_element_with_fallback(
-                            driver, button, timeout=10, max_attempts=3, log_prefix=f"Cluster Item #{rank_to_find_str}"
+                            driver, button, timeout=10, max_attempts=3, 
+                            log_prefix=f"Cluster Item #{rank_to_find_str}"
                         ):
                             logger.info(f"[{thread_id_str}] Successfully clicked on Rank #{rank_to_find_str}")
-                            time.sleep(1.5)  # Wait for cluster details panel to appear
-                            return True
+                            
+                            # Wait for cluster details panel to appear after clicking
+                            if wait_for_cluster_details(driver, thread_id_str, rank_to_find_str):
+                                logger.info(f"[{thread_id_str}] Cluster details panel loaded successfully for Rank #{rank_to_find_str}")
+                                return True
+                            else:
+                                logger.warning(f"[{thread_id_str}] Failed to load cluster details for Rank #{rank_to_find_str}")
+                                return False
                         else:
                             logger.error(f"[{thread_id_str}] Click FAILED for Rank #{rank_to_find_str} even with fallback.")
                             return False

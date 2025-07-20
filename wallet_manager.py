@@ -136,20 +136,13 @@ class WalletManager:
     def set_on_balance_change_callback(self, callback_func):
         """Set a callback function to be invoked when balance changes."""
         self.on_balance_change_callback = callback_func
-
-async def maybe_await(func, *args, **kwargs):
-    """Await func if it's a coroutine function, otherwise call it directly."""
-    if asyncio.iscoroutinefunction(func):
-        return await func(*args, **kwargs)
-    return func(*args, **kwargs)
-
+        
     async def _handle_account_notification(self, message_str: str):
         try:
             message = json.loads(message_str)
-            # print(f"[WALLET_MANAGER] WS Raw Message: {message}") # For debugging
             if message.get("method") == "accountNotification":
                 result = message.get("params", {}).get("result", {})
-                if result: # and result.get("context", {}).get("slot") is not None: # Check if it's a valid update
+                if result:
                     # The full account data is in result.get("value", {}).get("data")
                     # For SOL balance, the lamports are directly available in the new account info
                     new_lamports_value = result.get("value", {}).get("lamports")
@@ -157,26 +150,23 @@ async def maybe_await(func, *args, **kwargs):
                         self.current_sol_balance_lamports = new_lamports_value
                         sol_balance = Decimal(self.current_sol_balance_lamports) / Decimal(LAMPORTS_PER_SOL)
                         
-                        # Optionally re-fetch SOL price, or use the last known one for quicker update
-                        # For now, using last known price for simplicity on balance change notification
+                        # Get fresh USD price
+                        self.current_sol_price_usd = await get_sol_price_usd(self.httpx_client)
                         usd_balance = sol_balance * self.current_sol_price_usd 
                         
                         print(f"[WALLET_MANAGER] WebSocket Balance Update: {sol_balance:.6f} SOL (${usd_balance:.2f} USD)")
                         if self.on_balance_change_callback:
-                            try:
-                                # If callback is async, await it; otherwise, call directly
-                                if asyncio.iscoroutinefunction(self.on_balance_change_callback):
-                                    await self.on_balance_change_callback(sol_balance, usd_balance, self.current_sol_price_usd)
-                                else:
-                                    self.on_balance_change_callback(sol_balance, usd_balance, self.current_sol_price_usd)
-                            except Exception as cb_e:
-                                print(f"[WALLET_MANAGER] Error in on_balance_change_callback: {cb_e}")
+                            await maybe_await(
+                                self.on_balance_change_callback,
+                                sol_balance,
+                                usd_balance,
+                                self.current_sol_price_usd
+                            )
         except json.JSONDecodeError:
-            print(f"[WALLET_MANAGER] WS Error: Could not decode JSON: {message_str}")
+            print(f"[WALLET_MANAGER] Error decoding WebSocket message: {message_str}")
         except Exception as e:
-            print(f"[WALLET_MANAGER] WS Error processing message: {e}")
-
-
+            print(f"[WALLET_MANAGER] Error in _handle_account_notification: {e}")
+    
     async def subscribe_to_balance_changes(self):
         """Subscribes to account changes for the wallet's public key."""
         print(f"[WALLET_MANAGER] Subscribing to balance changes for {self.public_key} via WebSocket: {self.ws_url}...")
@@ -191,40 +181,51 @@ async def maybe_await(func, *args, **kwargs):
             "method": "accountSubscribe",
             "params": [
                 str(self.public_key),
-                {"encoding": "jsonParsed", "commitment": str(Confirmed)}
-            ],
+                {
+                    "encoding": "jsonParsed",
+                    "commitment": "confirmed"
+                }
+            ]
         }
-        
-        while True: # Loop to attempt reconnection if connection drops
-            try:
-                async with websocket_connect(self.ws_url) as websocket:
-                    await websocket.send(json.dumps(request))
-                    # Handle the first response which is the subscription ID
-                    first_resp = await websocket.recv()
-                    print(f"[WALLET_MANAGER] Subscription Response: {first_resp}")
 
-                    # Listen for notifications
-                    while True:
+        while True: # Outer loop for reconnection
+            try:
+                async with websocket_connect(self.ws_url, ping_interval=30) as websocket:
+                    print("[WALLET_MANAGER] WebSocket connected.")
+                    await websocket.send(json.dumps(request))
+                    
+                    # Process messages
+                    while True: # Inner loop for message processing
                         try:
-                            message = await asyncio.wait_for(websocket.recv(), timeout=60.0) # Add timeout to check connection
-                            await self._handle_account_notification(str(message))
+                            message = await websocket.recv()
+                            await self._handle_account_notification(message)
+                            
                         except asyncio.TimeoutError:
-                            # No message for 60 seconds - refresh balance to keep timestamp current
+                            # Refresh balance periodically to ensure we don't miss updates
                             sol_bal, usd_bal = await self.get_balance()
                             if self.on_balance_change_callback:
-                                try:
-                                    await maybe_await(self.on_balance_change_callback, sol_bal, usd_bal, self.current_sol_price_usd)
-                                except Exception as cb_e:
-                                    print(f"[WALLET_MANAGER] Error in on_balance_change_callback: {cb_e}")
+                                await maybe_await(
+                                    self.on_balance_change_callback,
+                                    sol_bal,
+                                    usd_bal,
+                                    self.current_sol_price_usd
+                                )
                         except Exception as e_inner:
                             print(f"[WALLET_MANAGER] Inner WebSocket loop error: {e_inner}")
                             break # Break inner to reconnect
+                            
             except ConnectionRefusedError:
                 print(f"[WALLET_MANAGER] WebSocket connection refused. Retrying in 10 seconds...")
             except Exception as e:
                 print(f"[WALLET_MANAGER] WebSocket connection error: {e}. Retrying in 10 seconds...")
             
             await asyncio.sleep(10) # Wait before retrying connection
+
+async def maybe_await(func, *args, **kwargs):
+    """Await func if it's a coroutine function, otherwise call it directly."""
+    if asyncio.iscoroutinefunction(func):
+        return await func(*args, **kwargs)
+    return func(*args, **kwargs)
 
 
 # --- Example Usage (can be run directly) ---

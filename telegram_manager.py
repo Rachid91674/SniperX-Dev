@@ -247,7 +247,7 @@ async def read_wallet_balance():
         
         if not os.path.exists(balance_file_path):
             logger.warning(f"Wallet balance file not found: {balance_file_path}")
-            return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0}
+            return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0, "status": "file_not_found"}
             
         with open(balance_file_path, "r") as f:
             try:
@@ -257,41 +257,44 @@ async def read_wallet_balance():
                 # Check if required fields exist
                 if not all(key in data for key in ["sol", "usd", "timestamp"]):
                     logger.error(f"Missing required fields in wallet balance data: {data}")
-                    return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0}
+                    return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0, "status": "missing_fields"}
                 
-                # Check if the data is recent (within last 5 minutes)
+                # Get the timestamp and calculate age
                 timestamp = float(data.get("timestamp", 0))
                 current_time = time.time()
                 time_diff = current_time - timestamp
                 
-                if time_diff > 300:  # 5 minutes in seconds
-                    logger.warning(f"Balance data is too old ({(time_diff/60):.1f} minutes old)")
-                    return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0}
-                
-                # Parse the balance values
+                # Always return the current balance, but include the age in the status
                 try:
                     sol_balance = Decimal(str(data["sol"]))
                     usd_balance = Decimal(str(data["usd"]))
                     
-                    logger.info(f"Successfully read balance - SOL: {sol_balance}, USD: {usd_balance}, Age: {(time_diff/60):.1f} minutes")
+                    status = "success"
+                    if time_diff > 300:  # 5 minutes in seconds
+                        status = f"stale_data ({(time_diff/60):.1f} minutes old)"
+                    
+                    logger.info(f"Read balance - SOL: {sol_balance}, USD: {usd_balance}, Age: {(time_diff/60):.1f} minutes, Status: {status}")
                     
                     return {
                         "sol": sol_balance,
                         "usd": usd_balance,
-                        "timestamp": timestamp
+                        "timestamp": timestamp,
+                        "status": status
                     }
                 except (ValueError, TypeError) as ve:
                     logger.error(f"Error parsing balance values: {ve}, data: {data}")
-                    return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0}
+                    return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0, "status": f"parse_error: {str(ve)}"}
                     
             except json.JSONDecodeError as je:
                 logger.error(f"Error decoding wallet balance JSON: {je}")
-                return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0}
+                return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0, "status": "json_decode_error"}
                 
     except Exception as e:
-        logger.exception(f"Unexpected error in read_wallet_balance: {e}")
+        error_msg = f"Unexpected error in read_wallet_balance: {str(e)}"
+        logger.exception(error_msg)
+        return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0, "status": f"error: {error_msg}"}
     
-    return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0}
+    return {"sol": Decimal("0"), "usd": Decimal("0"), "timestamp": 0, "status": "unknown_error"}
 
 async def button_callback(update: Update, context: CallbackContext) -> None:
     global wallet_manager_process  # Move global declaration here
@@ -396,12 +399,21 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
                             logger.info(f"Balance after wallet manager start: {current_balance}")
                             
                             if current_balance["sol"] == Decimal("0"):
-                                balance_text = "Wallet manager is starting up. Please wait a moment and try again."
-                                logger.info(balance_text)
+                                status_msg = current_balance.get("status", "unknown status")
+                                balance_text = f"Wallet manager is starting up. Status: {status_msg}\nPlease wait a moment and try again."
+                                logger.info(f"Balance not available yet. Status: {status_msg}")
                             else:
-                                last_update = datetime.fromtimestamp(current_balance["timestamp"]).strftime("%H:%M:%S")
-                                balance_text = f"Current Balance:\nSOL: {current_balance['sol']:.6f}\nUSD: ${current_balance['usd']:.2f}\n\nLast Update: {last_update}"
-                                logger.info("Balance retrieved successfully")
+                                last_update = datetime.fromtimestamp(current_balance["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+                                status_msg = current_balance.get("status", "")
+                                status_text = f"\n\nStatus: {status_msg}" if status_msg and status_msg != "success" else ""
+                                balance_text = (
+                                    f"Current Balance:\n"
+                                    f"SOL: {current_balance['sol']:.6f}\n"
+                                    f"USD: ${current_balance['usd']:.2f}\n"
+                                    f"\nLast Update: {last_update}"
+                                    f"{status_text}"
+                                )
+                                logger.info(f"Balance retrieved successfully. Status: {status_msg}")
                     except Exception as e:
                         logger.exception("Error in wallet manager startup:")
                         balance_text = f"Error starting wallet manager: {str(e)}. Please check logs and restart SniperX."
@@ -411,46 +423,75 @@ async def button_callback(update: Update, context: CallbackContext) -> None:
                     logger.info(f"Current balance: {current_balance}")
                     
                     if current_balance["sol"] == Decimal("0"):
-                        balance_text = "Waiting for wallet balance update...\nPlease try again in a few seconds."
-                        logger.info(balance_text)
+                        status_msg = current_balance.get("status", "waiting for update")
+                        balance_text = f"Waiting for wallet balance update...\nStatus: {status_msg}\nPlease try again in a few seconds."
+                        logger.info(f"Balance not available. Status: {status_msg}")
                     else:
-                        last_update = datetime.fromtimestamp(current_balance["timestamp"]).strftime("%H:%M:%S")
-                        balance_text = f"Current Balance:\nSOL: {current_balance['sol']:.6f}\nUSD: ${current_balance['usd']:.2f}\n\nLast Update: {last_update}"
-                        logger.info("Balance retrieved successfully")
+                        last_update = datetime.fromtimestamp(current_balance["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+                        status_msg = current_balance.get("status", "")
+                        status_text = f"\n\nStatus: {status_msg}" if status_msg and status_msg != "success" else ""
+                        balance_text = (
+                            f"Current Balance:\n"
+                            f"SOL: {current_balance['sol']:.6f}\n"
+                            f"USD: ${current_balance['usd']:.2f}\n"
+                            f"\nLast Update: {last_update}"
+                            f"{status_text}"
+                        )
+                        logger.info(f"Balance retrieved successfully. Status: {status_msg}")
             except Exception as e:
                 logger.exception("Unexpected error in show_balance:")
                 balance_text = f"An unexpected error occurred: {str(e)}. Please check logs and try again."
             else:
                 if current_balance["sol"] == Decimal("0"):
-                    balance_text = "Waiting for wallet balance update...\nPlease try again in a few seconds."
+                    status_msg = current_balance.get("status", "waiting for update")
+                    balance_text = f"Waiting for wallet balance update...\nStatus: {status_msg}\nPlease try again in a few seconds."
+                    logger.info(f"Balance not available in else block. Status: {status_msg}")
                 else:
-                    last_update = datetime.fromtimestamp(current_balance["timestamp"]).strftime("%H:%M:%S")
-                    balance_text = f"Current Balance:\nSOL: {current_balance['sol']:.6f}\nUSD: ${current_balance['usd']:.2f}\n\nLast Update: {last_update}"
+                    last_update = datetime.fromtimestamp(current_balance["timestamp"]).strftime("%Y-%m-%d %H:%M:%S")
+                    status_msg = current_balance.get("status", "")
+                    status_text = f"\n\nStatus: {status_msg}" if status_msg and status_msg != "success" else ""
+                    balance_text = (
+                        f"Current Balance:\n"
+                        f"SOL: {current_balance['sol']:.6f}\n"
+                        f"USD: ${current_balance['usd']:.2f}\n"
+                        f"\nLast Update: {last_update}"
+                        f"{status_text}"
+                    )
+                    logger.info(f"Balance retrieved in else block. Status: {status_msg}")
             
-            # Always try to edit the existing message first
+            # Check if message content has changed before updating
             try:
-                await query.edit_message_text(
-                    text=balance_text,
-                    reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("🔄 Refresh", callback_data='show_balance'),
-                        InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')
-                    ]])
-                )
+                current_text = query.message.text if hasattr(query.message, 'text') else ""
+                
+                # Only update if the text has changed
+                if current_text != balance_text:
+                    await query.edit_message_text(
+                        text=balance_text,
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton("🔄 Refresh", callback_data='show_balance'),
+                            InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')
+                        ]])
+                    )
+                else:
+                    logger.debug("Skipping balance update - content hasn't changed")
             except Exception as e:
-                logger.error(f"Error updating balance message: {e}")
-                # If editing fails, try to delete the old message and send a new one
-                try:
-                    if query.message:
-                        await query.message.delete()
-                        await query.message.reply_text(
-                            text=balance_text,
-                            reply_markup=InlineKeyboardMarkup([[
-                                InlineKeyboardButton("🔄 Refresh", callback_data='show_balance'),
-                                InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')
-                            ]])
-                        )
-                except Exception as delete_error:
-                    logger.error(f"Error handling message update: {delete_error}")
+                if "Message is not modified" in str(e):
+                    logger.debug("Message not modified - no changes to update")
+                else:
+                    logger.error(f"Error updating balance message: {e}")
+                    # If editing fails, try to delete the old message and send a new one
+                    try:
+                        if query.message:
+                            await query.message.delete()
+                            await query.message.reply_text(
+                                text=balance_text,
+                                reply_markup=InlineKeyboardMarkup([[
+                                    InlineKeyboardButton("🔄 Refresh", callback_data='show_balance'),
+                                    InlineKeyboardButton("🔙 Back to Menu", callback_data='back_to_menu')
+                                ]])
+                            )
+                    except Exception as delete_error:
+                        logger.error(f"Error handling message update: {delete_error}")
         elif action == 'back_to_menu':
             await show_menu(update, context)
     except Exception as e:
