@@ -19,6 +19,7 @@ INPUT_CSV_FILE = os.environ.get(
     "TOKEN_RISK_ANALYSIS_CSV",
     str(SCRIPT_DIR / "token_risk_analysis.csv"),
 )
+PROCESSED_TOKENS_FILE = str(SCRIPT_DIR / "processed_tokens.txt")
 SOL_PRICE_UPDATE_INTERVAL_SECONDS = 15
 TRADE_LOGIC_INTERVAL_SECONDS = 0.5
 CSV_CHECK_INTERVAL_SECONDS = 10
@@ -114,13 +115,34 @@ def remove_token_from_csv(token_address, csv_file_path):
             return False
     return False
 
-def load_token_from_csv(csv_file_path):
-    if not os.path.exists(csv_file_path): return None, None
+def load_processed_tokens(file_path):
+    if not os.path.exists(file_path):
+        return set()
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return set(line.strip() for line in f if line.strip())
+    except Exception as e:
+        print(f"Error loading processed tokens from {file_path}: {e}")
+        return set()
+
+def mark_token_processed(file_path, token_address):
+    try:
+        with open(file_path, 'a', encoding='utf-8') as f:
+            f.write(token_address + '\n')
+    except Exception as e:
+        print(f"Error marking token {token_address} as processed: {e}")
+
+def load_token_from_csv(csv_file_path, processed_tokens=None):
+    if not os.path.exists(csv_file_path):
+        return None, None
     print(f"\n=== Checking for Low Risk tokens in {os.path.basename(csv_file_path)} ===")
     try:
         with open(csv_file_path, mode='r', newline='', encoding='utf-8-sig') as file:
             reader = csv.DictReader(file)
             for row in reader:
+                mint_addr = row.get('Address')
+                if processed_tokens and mint_addr in processed_tokens:
+                    continue
                 token_name = row.get('Name', '').strip() or row.get('Address', 'Unknown')
                 risk_status = row.get('Overall_Risk_Status', '').strip()
                 
@@ -137,7 +159,7 @@ def load_token_from_csv(csv_file_path):
                         continue
                     if liquidity_val >= MIN_LIQUIDITY_USD and price_impact_val < PRICE_IMPACT_THRESHOLD_MONITOR:
                         print(f"✅ Found valid Low Risk token: {token_name}")
-                        return row.get('Address'), token_name
+                        return mint_addr, token_name
                     else:
                         print(f"❌ Low Risk token {token_name} failed final sanity check.")
                         if liquidity_val < MIN_LIQUIDITY_USD: print(f"   Liquidity: ${liquidity_val:,.2f} (Required >= ${MIN_LIQUIDITY_USD})")
@@ -347,43 +369,49 @@ async def trade_logic_and_price_display_loop(mint_address, token_name):
             print(f"\nError in trade logic loop for {token_name}: {e}. Continuing...")
             await asyncio.sleep(1) # Brief pause after an error
 
+async def process_token(mint_address, token_name):
+    global g_current_mint_address, g_token_name
+    g_current_mint_address = mint_address
+    g_token_name = token_name
+    print(f"\n🚀 Starting monitoring for: {token_name} ({mint_address})")
+    reset_token_specific_state()
+
+    listener_task = asyncio.create_task(listen_for_trades(mint_address, token_name))
+    trader_task = asyncio.create_task(trade_logic_and_price_display_loop(mint_address, token_name))
+
+    await trader_task
+
+    print(f"Token lifecycle for {token_name} complete. Cleaning up...")
+    listener_task.cancel()
+    await asyncio.gather(listener_task, return_exceptions=True)
+
+    g_current_mint_address, g_token_name = None, None
+    print("\n" + "="*50)
+    print("Cycle complete. Ready for next token.")
+    print("="*50 + "\n")
+
 async def main():
     global g_current_mint_address, g_token_name
     sol_price_task = asyncio.create_task(periodic_sol_price_updater())
-    
+    processed_tokens = load_processed_tokens(PROCESSED_TOKENS_FILE)
+
     try:
         while True:
-            # This is the main control loop. It will only ever have one token active at a time.
-            mint_address, token_name = load_token_from_csv(INPUT_CSV_FILE)
-            
+            mint_address, token_name = load_token_from_csv(INPUT_CSV_FILE, processed_tokens)
+
             if not mint_address:
-                print("No tokens available for monitoring. Exiting...")
-                return
+                print("No tokens available for monitoring. Sleeping...")
+                await asyncio.sleep(CSV_CHECK_INTERVAL_SECONDS)
+                continue
 
-            g_current_mint_address = mint_address
-            g_token_name = token_name
-            print(f"\n🚀 Starting monitoring for: {g_token_name} ({g_current_mint_address})")
-            reset_token_specific_state()
-            
-            listener_task = asyncio.create_task(listen_for_trades(g_current_mint_address, g_token_name))
-            trader_task = asyncio.create_task(trade_logic_and_price_display_loop(g_current_mint_address, g_token_name))
-            
-            # --- FIX: New, simpler control flow ---
-            # Wait for the trader task to finish. It is the master task for a token's lifecycle.
-            await trader_task
-            
-            # Once the trader task is done, the token's lifecycle is over. Clean up.
-            print(f"Token lifecycle for {g_token_name} complete. Cleaning up...")
-            listener_task.cancel() # Cancel the websocket listener
-            await asyncio.gather(listener_task, return_exceptions=True)
-
-            remove_token_from_csv(g_current_mint_address, INPUT_CSV_FILE)
-            
-            g_current_mint_address, g_token_name = None, None
-            print("\n" + "="*50)
-            print("Cycle complete. Ready for next token.")
-            print("="*50 + "\n")
-            await asyncio.sleep(2) # Small delay before checking for the next token
+            try:
+                await process_token(mint_address, token_name)
+            except Exception as e:
+                print(f"Error processing token {token_name}: {e}")
+            finally:
+                mark_token_processed(PROCESSED_TOKENS_FILE, mint_address)
+                processed_tokens.add(mint_address)
+                await asyncio.sleep(1)
 
     except KeyboardInterrupt:
         print("\n📉 Monitoring stopped by user.")
