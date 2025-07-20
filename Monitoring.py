@@ -357,8 +357,8 @@ async def main():
             mint_address, token_name = load_token_from_csv(INPUT_CSV_FILE)
             
             if not mint_address:
-                await asyncio.sleep(CSV_CHECK_INTERVAL_SECONDS)
-                continue
+                print("No tokens available for monitoring. Exiting...")
+                return
 
             g_current_mint_address = mint_address
             g_token_name = token_name
