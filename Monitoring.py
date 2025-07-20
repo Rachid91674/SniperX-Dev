@@ -411,6 +411,7 @@ async def main():
             finally:
                 mark_token_processed(PROCESSED_TOKENS_FILE, mint_address)
                 processed_tokens.add(mint_address)
+                remove_token_from_csv(mint_address, INPUT_CSV_FILE)
                 await asyncio.sleep(1)
 
     except KeyboardInterrupt:
